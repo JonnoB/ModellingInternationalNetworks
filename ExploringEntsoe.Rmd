@@ -1,0 +1,106 @@
+---
+title: "Untitled"
+author: "Jonathan Bourne"
+date: "7 June 2018"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r}
+packages <- c("tidyverse", "igraph","readr","readxl", "broom", "zoo", "stringr","foreach", "doMC",  "xtable", "geomnet", "ggnetwork", "rlang", "animation", "ggridges", "poweRlaw", "Rtsne", "caret", "ranger", "xtable", "broom", "modelr", "yardstick")
+
+new.packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+
+sapply(packages, library, character.only = TRUE)
+
+
+lapply(packages, library, character.only = TRUE)
+library(PowerGridNetworking)
+
+datafolder <- "/home/jonno/Downloads/entsoe_extract"
+
+setwd(datafolder)
+buses <- read_csv("buses.csv", quote="'")
+links <- read_csv("links.csv",  quote="'")
+generators <- read_csv("generators.csv",  quote="'")
+transformers <- read_csv("transformers.csv",  quote="'")
+
+```
+
+#Create Network
+```{r}
+
+```
+
+Filter By country
+
+```{r}
+
+AddTags <- function(df){
+  
+  test1 <- df %>% 
+  mutate(tags =  ifelse(is.na(tags), "Empty\"=>\"TRUE", tags)) %>% .$tags %>% 
+  str_split(., "," )  
+
+test2 <- 1:length(test1) %>% 
+  map_df(., ~{
+         HasSplit <- grepl("=>", test1[[.x]])
+        df <- str_split(test1[[.x]][HasSplit], "=>", simplify = T ) %>%
+        gsub("\"", "",.) %>% as_tibble() %>%
+          mutate(row= .x,
+                 V1 = trimws(V1)) 
+          }
+      )   %>% 
+          spread(key = V1, value = V2)
+
+df <- bind_cols(df, test2)
+  
+}
+
+buses2 <- AddTags(buses) 
+
+buses2 <- buses2$geometry %>% gsub("POINT\\(", "", .) %>% 
+  gsub("\\)", "",.) %>%
+  str_split_fixed(., " ", 2) %>% as_tibble() %>%
+  mutate_all(as.numeric) %>%
+  set_names(c("x", "y")) %>% bind_cols(buses2, .)
+
+generators2 <-AddTags(generators)
+
+links2 <- AddTags(links) %>%
+  select(src_bus_id, dst_bus_id, everything())
+
+unique(links2$country_1)
+class(links2$shape_leng)
+
+links2 %>%
+  filter(!is.na(tags)) %>%
+ggplot(.,aes(x= as.numeric(shape_leng), group = country_1 )) + geom_density() 
+
+```
+
+
+
+```{r}
+
+links3 <- links2 %>% filter(country_1=="GB")
+
+buses3 <- buses2 %>% filter(bus_id %in% c(links3$src_bus_id, links3$dst_bus_id))
+  
+g <- graph_from_data_frame(links3, directed = FALSE, vertices = buses3)
+
+g %>%
+  simplify(., remove.multiple = T, remove.loops = T) %>% 
+  plot(.,vertex.size=.8, edge.arrow.size=.4, vertex.label = NA, layout=as.matrix(buses3[,c("x","y")]) )
+
+g %>%
+  simplify(., remove.multiple = T, remove.loops = T) %>% 
+  plot(.,vertex.size=.8, edge.arrow.size=.4, vertex.label = NA )
+
+
+```
+
