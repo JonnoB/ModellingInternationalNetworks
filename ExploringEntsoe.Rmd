@@ -9,7 +9,7 @@ editor_options:
 
 
 ```{r}
-packages <- c("tidyverse", "igraph","readr","readxl", "broom", "zoo", "stringr","foreach", "doMC",  "xtable", "geomnet", "ggnetwork", "rlang", "animation", "ggridges", "poweRlaw", "Rtsne", "caret", "ranger", "xtable", "broom", "modelr", "yardstick")
+packages <- c("tidyverse", "igraph","readr","readxl", "broom", "zoo", "stringr","foreach", "doMC",  "xtable", "geomnet", "ggnetwork", "rlang", "animation", "ggridges", "poweRlaw", "Rtsne", "caret", "ranger", "xtable", "broom", "modelr", "yardstick", "rgeos", "sp", "rgdal")
 
 new.packages <- packages[!(packages %in% installed.packages()[,"Package"])]
 if(length(new.packages)) install.packages(new.packages)
@@ -21,7 +21,8 @@ sapply(packages, library, character.only = TRUE)
 lapply(packages, library, character.only = TRUE)
 library(PowerGridNetworking)
 
-datafolder <- "/home/jonno/Downloads/entsoe_extract"
+datafolder <- "/home/jonno/ModellingInternationalNetworks/entsoe_extract"
+WorldShapeFile <- "/home/jonno/Dropbox/Jonathan_Bourne_Phd_Folder/WorldBoarders"
 
 setwd(datafolder)
 buses <- read_csv("buses.csv", quote="'")
@@ -31,13 +32,9 @@ transformers <- read_csv("transformers.csv",  quote="'")
 
 ```
 
-#Create Network
-```{r}
+#Tag Cleaning
 
-```
-
-Filter By country
-
+This chunk creates the function required to seperate the tags on the network.
 ```{r}
 
 AddTags <- function(df){
@@ -61,6 +58,12 @@ df <- bind_cols(df, test2)
   
 }
 
+```
+
+#Clean Country
+
+```{r}
+
 buses2 <- AddTags(buses) 
 
 buses2 <- buses2$geometry %>% gsub("POINT\\(", "", .) %>% 
@@ -74,33 +77,218 @@ generators2 <-AddTags(generators)
 links2 <- AddTags(links) %>%
   select(src_bus_id, dst_bus_id, everything())
 
-unique(links2$country_1)
-class(links2$shape_leng)
 
-links2 %>%
-  filter(!is.na(tags)) %>%
-ggplot(.,aes(x= as.numeric(shape_leng), group = country_1 )) + geom_density() 
+#links2 %>%
+ # filter(!is.na(tags)) %>%
+#ggplot(.,aes(x= as.numeric(shape_leng), group = country_1 )) + geom_density() 
 
 ```
 
 
+#Create Entsoe basegraph
+```{r}
+gbaseEnt <- graph_from_data_frame(links2, directed = FALSE, vertices = buses2)
+```
+
+
+#Subsets graph by country
+```{r}
+
+SubsetCountry<- function(graph, country_name, vertex_id = "name", country_id = "country"){
+
+  NodeCountry<- tibble(VertexName = get.vertex.attribute(gbaseEnt, vertex_id), 
+                     country = get.vertex.attribute(gbaseEnt, country_id)) %>%
+  filter(country != country_name | is.na(country))
+
+  Out <- delete_vertices(gbaseEnt, NodeCountry$VertexName)
+  
+  return(Out)
+
+}
+
+```
+
+
+TAG all nodes if they are NA and inside a countries borders
+```{r}
+setwd(WorldShapeFile)
+borders <- readOGR("TM_WORLD_BORDERS-0.3.shp")
+
+
+#Pre-Loop
+buses2 <- buses2 %>%
+  mutate(BorderCount = NA)
+
+Countries<- unique(buses2$country)
+
+for(ISO2 in Countries[!is.na(Countries)]){
+
+  #In loop
+  borders2<- borders[borders@data$ISO2==ISO2,]
+  
+  Countrydf <-  data.frame(bus_id = buses2$bus_id, Latitude = buses2$x, Longitude = buses2$y, buses2$name_eng)
+  
+  coordinates(Countrydf) <- ~ Latitude + Longitude
+  
+  # Set the projection of the SpatialPointsDataFrame using the projection of the shapefile
+  proj4string(Countrydf) <- proj4string(borders2)
+  
+  Out <-Countrydf[borders2,] %>% as.data.frame %>%
+    mutate(BorderCount = ISO2) %>%
+    select(bus_id, BorderCount)
+  
+  buses2 <- buses2 %>%
+    mutate(BorderCount = ifelse(bus_id %in% Out$bus_id, ISO2, BorderCount))
+  
+}
+
+buses2 <- buses2 %>%
+  mutate(BorderCount = ifelse(is.na(country), BorderCount, country))
+
+
+gbaseEnt <- graph_from_data_frame(links2, directed = FALSE, vertices = buses2)
+
+```
+
+#Tag 2
+
+Tag all nodes if they are in the network of some other node that has a country
+```{r}
+VertexCountry <-  tibble(name = get.vertex.attribute(gbaseEnt, "name"), 
+                 country = get.vertex.attribute(gbaseEnt, "BorderCount")) %>%
+  mutate(name = as.integer(name))
+
+ 
+#insert the country code of each node into the links data frame
+LinksPLus <- links2 %>% left_join(., VertexCountry, by = c("src_bus_id" = "name")) %>%
+  rename(countryRep1 = country) %>%
+  left_join(., VertexCountry, by = c("dst_bus_id" = "name")) %>%
+  rename(countryRep2 = country)
+
+#find that it is different to the original
+table(is.na(LinksPLus$country_1), is.na(LinksPLus$countryRep1))
+table(is.na(LinksPLus$country_2), is.na(LinksPLus$countryRep2))
+table(is.na(LinksPLus$countryRep1), is.na(LinksPLus$countryRep2))
+
+LinksPLus2 <- LinksPLus
+
+for(i in 1:5){
+  
+  Missing1 <-sum(is.na(LinksPLus2$countryRep1))
+  Missing2 <-sum(is.na(LinksPLus2$countryRep2))
+  
+  LinksPLus2 <- LinksPLus2 %>%
+    mutate(countryRep2 = ifelse(is.na(countryRep2), countryRep1, countryRep2),
+           countryRep2 = ifelse(is.na(countryRep2), country_2, countryRep2))
+ 
+  New2 <- sum(is.na(LinksPLus2$countryRep2))
+  print(paste("Missing2 removed", Missing2 - New2) )
+  LinksPLus2 <- LinksPLus2 %>%
+    mutate(countryRep1 = ifelse(is.na(countryRep1), countryRep2, countryRep1),
+            countryRep1 = ifelse(is.na(countryRep1), country_1, countryRep1))  
+  
+    New3 <- sum(is.na(LinksPLus2$countryRep2))
+  print(paste("Missing1 removed", Missing1 - New3) )
+
+  }
+
+table(is.na(LinksPLus2$country_1), is.na(LinksPLus2$countryRep1))
+table(is.na(LinksPLus2$country_2), is.na(LinksPLus2$countryRep2))
+table(is.na(LinksPLus2$countryRep1), is.na(LinksPLus2$countryRep2))
+
+#only two nodes remaining untagged both are in GB
+test <- LinksPLus2 %>%
+  filter(country_1 == "GB")
+
+
+  VertexCountry <- bind_rows(LinksPLus2 %>% 
+                               select(src_bus_id, countryRep1) %>% 
+                               rename(bus_id = src_bus_id, country = countryRep1), 
+                             LinksPLus2 %>% 
+                               select(dst_bus_id, countryRep2)%>% 
+                               rename(bus_id = dst_bus_id, country = countryRep2)) %>%
+    group_by(bus_id) %>%
+    summarise(country = first(country)) %>% ungroup %>%
+    mutate(country = ifelse(is.na(country), "GB", country))
+    
+
+buses2 <- buses2 %>% select(-country,-BorderCount) %>%
+  left_join(VertexCountry)
+rm(VertexCountry); rm(LinksPLus); rm(LinksPLus2)
+
+BusCountry <- buses2 %>% select(bus_id, country)
+
+links2 <- links2 %>%
+  select(-country_1, -country_2) %>%
+  left_join(., BusCountry, by= c("src_bus_id"= "bus_id")) %>%
+  rename(country_1 = country) %>%
+  left_join(., BusCountry, by= c("dst_bus_id"= "bus_id")) %>%
+  rename(country_2 = country)
+
+```
+
+
+#Clean graph with all nodes having a country
+```{r}
+gbaseEnt <- graph_from_data_frame(links2, directed = FALSE, vertices = buses2)
+```
+
+
+Filter By country
+
+
+#Plot Country grid
+```{r}
+
+SubsetCountry(gbaseEnt, "GB") %>%
+  simplify(., remove.multiple = T, remove.loops = T) %>% 
+  plot(.,vertex.size=.8, edge.arrow.size=.4, vertex.label = NA, 
+       layout=as.matrix(tibble(x = get.vertex.attribute(., "x"), y = get.vertex.attribute(., "y"))) )
+
+SubsetCountry(gbaseEnt, "NO") %>%
+  simplify(., remove.multiple = T, remove.loops = T) %>% 
+  plot(.,vertex.size=.8, edge.arrow.size=.4, vertex.label = NA)
+
+
+
+GBnet <- SubsetCountry(gbaseEnt, "GB")
+GBnet %>% NetworkStats
+
+components(GBnet)
+
+gbaseEnt %>% components()
+gbaseEnt %>% NetworkStats
+
+test <- fit_power_law(degree(gbaseEnt))
+
+test <- fit_power_law(degree(GBnet))
+
+
+```
 
 ```{r}
 
-links3 <- links2 %>% filter(country_1=="GB")
+CountriesOI <-  c("NO", "GB", "ES", "FR", "DE", "IT", "PL")
 
-buses3 <- buses2 %>% filter(bus_id %in% c(links3$src_bus_id, links3$dst_bus_id))
-  
-g <- graph_from_data_frame(links3, directed = FALSE, vertices = buses3)
+links2 %>%
+  filter(country_1 ==  country_2) %>%
+  filter(country_1 %in% CountriesOI) %>%
+ggplot(.,aes(x= as.numeric(shape_leng), colour = country_1 )) + geom_density()
 
-g %>%
-  simplify(., remove.multiple = T, remove.loops = T) %>% 
-  plot(.,vertex.size=.8, edge.arrow.size=.4, vertex.label = NA, layout=as.matrix(buses3[,c("x","y")]) )
+test <- CountriesOI %>% map_df(~{
+  SubsetCountry(gbaseEnt, .x) %>% NetworkStats %>%
+    set_names(c("Metric", .x))
+    #mutate(Country = .x)
+}) %>%
+  spread(Country, value) 
 
-g %>%
-  simplify(., remove.multiple = T, remove.loops = T) %>% 
-  plot(.,vertex.size=.8, edge.arrow.size=.4, vertex.label = NA )
-
+NetworkCompare <- CountriesOI %>% map(~{
+  SubsetCountry(gbaseEnt, .x) %>% NetworkStats %>%
+    mutate(value = round(value, 2)) %>%
+    set_names(c("Metric", .x))
+    #mutate(Country = .x)
+}) %>% reduce(., left_join)
 
 ```
+
 
